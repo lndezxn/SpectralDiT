@@ -1,0 +1,40 @@
+data:
+  root: datasets
+  batch_size: 1024
+  num_workers: 4
+  pin_memory: true
+
+model:
+  name: dit_plain_small
+  image_size: 32
+  patch_size: 4
+  in_channels: 3
+  num_classes: 10
+  pos_embed_type: 2d_sincos
+
+train:
+  seed: 42
+  output_dir: outputs/cifar10_dit_small
+  mixed_precision: bf16
+  grad_accum_steps: 1
+  max_steps: 400000
+  learning_rate: 0.0003
+  min_learning_rate: 0.00002
+  warmup_steps: 5000
+  weight_decay: 0.0
+  beta1: 0.9
+  beta2: 0.95
+  grad_clip: 1.0
+  log_every: 50
+  eval_every: 10000
+  save_every: 10000
+  resume_from: null
+
+sample:
+  num_steps: 50
+  num_samples: 64
+
+eval:
+  batch_size: 256
+  sample_batch_size: 256
+  fid_num_samples: 10000

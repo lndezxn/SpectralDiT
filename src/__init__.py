@@ -1,0 +1,1 @@
+"""SpectralDiT package."""
