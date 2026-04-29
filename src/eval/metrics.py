@@ -29,11 +29,13 @@ class GenerativeMetrics:
         self._real_ready = True
 
     @torch.no_grad()
-    def compute(self, fake_images: torch.Tensor) -> dict[str, float]:
+    def update_fake(self, fake_images: torch.Tensor) -> None:
         fake_uint8 = to_uint8_images(fake_images).to(self.device)
         self.fid.update(fake_uint8, real=False)
         self.inception_score.update(fake_uint8)
 
+    @torch.no_grad()
+    def compute(self) -> dict[str, float]:
         fid_value = float(self.fid.compute().item())
         inception_mean, inception_std = self.inception_score.compute()
         self.fid.reset()

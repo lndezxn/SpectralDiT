@@ -18,7 +18,7 @@ class DiTSpec:
 
 
 MODEL_SPECS: dict[str, DiTSpec] = {
-    "dit_plain_small": DiTSpec(depth=8, hidden_size=384, num_heads=6, mlp_ratio=4.0),
+    "dit_plain_small": DiTSpec(depth=8, hidden_size=192, num_heads=4, mlp_ratio=4.0),
     "dit_plain_base": DiTSpec(depth=12, hidden_size=768, num_heads=12, mlp_ratio=4.0),
 }
 
@@ -42,6 +42,7 @@ class PixelDiT(nn.Module):
         patch_size: int,
         in_channels: int,
         num_classes: int,
+        class_dropout_prob: float,
         spec: DiTSpec,
     ) -> None:
         super().__init__()
@@ -59,7 +60,7 @@ class PixelDiT(nn.Module):
         pos_embed = build_2d_sincos_pos_embed(spec.hidden_size, self.grid_size)
         self.register_buffer("pos_embed", pos_embed.unsqueeze(0), persistent=False)
         self.time_embed = TimestepEmbedder(spec.hidden_size)
-        self.label_embed = LabelEmbedder(num_classes, spec.hidden_size)
+        self.label_embed = LabelEmbedder(num_classes, spec.hidden_size, class_dropout_prob)
         self.blocks = nn.ModuleList(
             [AdaLNZeroBlock(spec.hidden_size, spec.num_heads, spec.mlp_ratio) for _ in range(spec.depth)]
         )
@@ -122,5 +123,6 @@ def build_model(config: dict[str, object]) -> PixelDiT:
         patch_size=int(config["patch_size"]),
         in_channels=int(config["in_channels"]),
         num_classes=int(config["num_classes"]),
+        class_dropout_prob=float(config.get("class_dropout_prob", 0.0)),
         spec=spec,
     )

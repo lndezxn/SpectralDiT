@@ -51,11 +51,16 @@ class TimestepEmbedder(nn.Module):
 
 
 class LabelEmbedder(nn.Module):
-    def __init__(self, num_classes: int, hidden_size: int) -> None:
+    def __init__(self, num_classes: int, hidden_size: int, dropout_prob: float) -> None:
         super().__init__()
-        self.embedding = nn.Embedding(num_classes, hidden_size)
+        self.num_classes = num_classes
+        self.dropout_prob = dropout_prob
+        self.embedding = nn.Embedding(num_classes + 1, hidden_size)
 
     def forward(self, labels: torch.Tensor) -> torch.Tensor:
+        if self.training and self.dropout_prob > 0.0:
+            drop_mask = torch.rand(labels.shape, device=labels.device) < self.dropout_prob
+            labels = labels.masked_fill(drop_mask, self.num_classes)
         return self.embedding(labels)
 
 

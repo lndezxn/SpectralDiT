@@ -9,6 +9,7 @@ from torchvision.utils import make_grid
 
 from src.eval.sample import make_label_batch, sample_euler
 from src.model.dit import build_model
+from src.train.ema import create_ema_model
 from src.utils.checkpoint import load_checkpoint
 from src.utils.config import ensure_dir, load_config
 
@@ -25,16 +26,17 @@ def main() -> None:
     args = parse_args()
     config = load_config(args.config)
     model = build_model(config["model"])
-    load_checkpoint(args.ckpt, model)
-    model.eval()
+    ema_model = create_ema_model(model)
+    load_checkpoint(args.ckpt, model, ema_model=ema_model)
+    ema_model.eval()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model.to(device)
+    ema_model.to(device)
 
     num_samples = args.num_samples or int(config["sample"]["num_samples"])
     labels = make_label_batch(num_samples, int(config["model"]["num_classes"]), device)
     samples = sample_euler(
-        model=model,
+        model=ema_model,
         num_samples=num_samples,
         image_size=int(config["model"]["image_size"]),
         in_channels=int(config["model"]["in_channels"]),

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+from contextlib import nullcontext
 
 import torch
 
@@ -20,7 +21,13 @@ def sample_euler(
     step_size = 1.0 / num_steps
     for step in range(num_steps):
         t = torch.full((num_samples,), step / num_steps, device=device, dtype=dtype)
-        velocity = model(x, t, labels)
+        autocast_context = (
+            torch.autocast(device_type=device.type, dtype=dtype)
+            if device.type in {"cuda", "cpu"} and dtype in {torch.float16, torch.bfloat16}
+            else nullcontext()
+        )
+        with autocast_context:
+            velocity = model(x, t, labels)
         x = x + step_size * velocity
     return x.clamp(-1.0, 1.0)
 

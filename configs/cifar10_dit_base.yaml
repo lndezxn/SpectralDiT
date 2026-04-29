@@ -1,15 +1,16 @@
 data:
   root: datasets
-  batch_size: 1024
+  batch_size: 256
   num_workers: 4
   pin_memory: true
 
 model:
   name: dit_plain_base
   image_size: 32
-  patch_size: 4
+  patch_size: 1
   in_channels: 3
   num_classes: 10
+  class_dropout_prob: 0.1
   pos_embed_type: 2d_sincos
 
 train:
@@ -18,14 +19,15 @@ train:
   mixed_precision: bf16
   grad_accum_steps: 1
   max_steps: 400000
-  learning_rate: 0.0003
-  min_learning_rate: 0.00002
+  learning_rate: 0.0001
+  min_learning_rate: 0.00001
   warmup_steps: 5000
+  ema_decay: 0.9999
   weight_decay: 0.0
   beta1: 0.9
-  beta2: 0.95
+  beta2: 0.99
   grad_clip: 1.0
-  log_every: 50
+  log_every: 500
   eval_every: 10000
   save_every: 10000
   resume_from: null
