@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
 import torch
 from torch import nn
@@ -101,12 +102,35 @@ class PixelDiT(nn.Module):
         x = x.permute(0, 5, 1, 3, 2, 4).contiguous()
         return x.view(batch_size, self.in_channels, self.image_size, self.image_size)
 
-    def forward(self, x: torch.Tensor, timesteps: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        x: torch.Tensor,
+        timesteps: torch.Tensor,
+        labels: torch.Tensor,
+        debug_collector: Any | None = None,
+    ) -> torch.Tensor:
         tokens = self.patch_embed(x)
         tokens = tokens + self.pos_embed.to(dtype=tokens.dtype, device=tokens.device)
         condition = self.time_embed(timesteps) + self.label_embed(labels)
-        for block in self.blocks:
-            tokens = block(tokens, condition)
+        if debug_collector is None:
+            for block in self.blocks:
+                tokens = block(tokens, condition)
+        else:
+            for block in self.blocks:
+                tokens, debug_tensors = block(
+                    tokens,
+                    condition,
+                    return_debug_tensors=True,
+                    token_grid_size=self.grid_size,
+                )
+                debug_collector.record_block(
+                    attn_residual=debug_tensors.attn_residual,
+                    mlp_residual=debug_tensors.mlp_residual,
+                    mlp_residual_low=debug_tensors.mlp_residual_low,
+                    mlp_residual_high=debug_tensors.mlp_residual_high,
+                    block_output_tokens=debug_tensors.block_output_tokens,
+                )
+            debug_collector.set_step_output_tokens(tokens)
         output = self.final_layer(tokens, condition)
         return self.unpatchify(output)
 

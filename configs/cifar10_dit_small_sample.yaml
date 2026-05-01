@@ -1,0 +1,19 @@
+model:
+  name: dit_plain_small
+  image_size: 32
+  patch_size: 1
+  in_channels: 3
+  num_classes: 10
+  class_dropout_prob: 0.1
+  pos_embed_type: 2d_sincos
+
+train:
+  output_dir: outputs/cifar10_dit_small_sample
+
+sample:
+  num_steps: 5
+  num_samples: 1
+  debug:
+    enabled: true
+    output_subdir: debug_tokens
+    save_dtype: float32

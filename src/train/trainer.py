@@ -16,6 +16,7 @@ from torchvision.utils import make_grid
 import torchvision
 
 from src.data.cifar10 import build_dataloader
+from src.eval.debug import resolve_debug_config
 from src.eval.metrics import GenerativeMetrics
 from src.eval.sample import make_label_batch, sample_euler
 from src.model.dit import build_model
@@ -366,14 +367,23 @@ class Trainer:
         eval_config = self.config["eval"]
         model_config = self.config["model"]
         sample_config = self.config["sample"]
+        debug_config = resolve_debug_config(sample_config)
         total_samples = int(eval_config["fid_num_samples"])
         batch_size = int(eval_config["sample_batch_size"])
         dtype = _resolve_dtype(str(self.config["train"]["mixed_precision"]))
         preview_batch: torch.Tensor | None = None
+        debug_root_dir = None
+        if debug_config["enabled"]:
+            debug_root_dir = ensure_dir(
+                Path(self.output_dir) / str(debug_config["output_subdir"]) / f"eval_step_{self.global_step:07d}"
+            )
 
         for batch_start in range(0, total_samples, batch_size):
             current_batch = min(batch_size, total_samples - batch_start)
             labels = make_label_batch(current_batch, int(model_config["num_classes"]), self.device)
+            debug_output_dir = None
+            if debug_root_dir is not None:
+                debug_output_dir = debug_root_dir / f"batch_{batch_start:07d}"
             samples = sample_euler(
                 model=eval_model,
                 num_samples=current_batch,
@@ -383,6 +393,8 @@ class Trainer:
                 num_steps=int(sample_config["num_steps"]),
                 device=self.device,
                 dtype=dtype,
+                debug_output_dir=debug_output_dir,
+                debug_config=debug_config,
             )
             samples = samples.float()
             if preview_batch is None:

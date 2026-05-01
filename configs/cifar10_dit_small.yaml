@@ -35,6 +35,10 @@ train:
 sample:
   num_steps: 50
   num_samples: 64
+  debug:
+    enabled: false
+    output_subdir: debug_tokens
+    save_dtype: float32
 
 eval:
   batch_size: 256
