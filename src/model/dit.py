@@ -5,8 +5,9 @@ from typing import Any
 
 import torch
 from torch import nn
+from torch.utils.checkpoint import checkpoint
 
-from src.model.blocks import AdaLNZeroBlock, modulate
+from src.model.blocks import AdaLNZeroBlock, FreqResidualGatingConfig, modulate
 from src.model.embeddings import LabelEmbedder, PatchEmbed, TimestepEmbedder, build_2d_sincos_pos_embed
 
 
@@ -45,6 +46,8 @@ class PixelDiT(nn.Module):
         num_classes: int,
         class_dropout_prob: float,
         spec: DiTSpec,
+        freq_residual_gating: FreqResidualGatingConfig | None = None,
+        activation_checkpointing: bool = False,
     ) -> None:
         super().__init__()
         if image_size % patch_size != 0:
@@ -56,6 +59,8 @@ class PixelDiT(nn.Module):
         self.hidden_size = spec.hidden_size
         self.grid_size = image_size // patch_size
         self.num_patches = self.grid_size**2
+        self.freq_residual_gating = freq_residual_gating or FreqResidualGatingConfig()
+        self.activation_checkpointing = activation_checkpointing
 
         self.patch_embed = PatchEmbed(in_channels, spec.hidden_size, patch_size)
         pos_embed = build_2d_sincos_pos_embed(spec.hidden_size, self.grid_size)
@@ -63,7 +68,15 @@ class PixelDiT(nn.Module):
         self.time_embed = TimestepEmbedder(spec.hidden_size)
         self.label_embed = LabelEmbedder(num_classes, spec.hidden_size, class_dropout_prob)
         self.blocks = nn.ModuleList(
-            [AdaLNZeroBlock(spec.hidden_size, spec.num_heads, spec.mlp_ratio) for _ in range(spec.depth)]
+            [
+                AdaLNZeroBlock(
+                    spec.hidden_size,
+                    spec.num_heads,
+                    spec.mlp_ratio,
+                    freq_residual_gating=self.freq_residual_gating,
+                )
+                for _ in range(spec.depth)
+            ]
         )
         self.final_layer = FinalLayer(spec.hidden_size, patch_size, in_channels)
         self._initialize_weights()
@@ -84,6 +97,9 @@ class PixelDiT(nn.Module):
         for block in self.blocks:
             nn.init.zeros_(block.ada_ln[-1].weight)
             nn.init.zeros_(block.ada_ln[-1].bias)
+            if block.freq_gate is not None:
+                nn.init.zeros_(block.freq_gate[-1].weight)
+                nn.init.zeros_(block.freq_gate[-1].bias)
         nn.init.zeros_(self.final_layer.ada_ln[-1].weight)
         nn.init.zeros_(self.final_layer.ada_ln[-1].bias)
 
@@ -114,7 +130,22 @@ class PixelDiT(nn.Module):
         condition = self.time_embed(timesteps) + self.label_embed(labels)
         if debug_collector is None:
             for block in self.blocks:
-                tokens = block(tokens, condition)
+                if self.training and self.activation_checkpointing:
+                    def run_block(block_tokens: torch.Tensor, block_condition: torch.Tensor, *, current_block: nn.Module = block) -> torch.Tensor:
+                        return current_block(
+                            block_tokens,
+                            block_condition,
+                            token_grid_size=self.grid_size,
+                        )
+
+                    tokens = checkpoint(
+                        run_block,
+                        tokens,
+                        condition,
+                        use_reentrant=False,
+                    )
+                else:
+                    tokens = block(tokens, condition, token_grid_size=self.grid_size)
         else:
             for block in self.blocks:
                 tokens, debug_tensors = block(
@@ -125,9 +156,14 @@ class PixelDiT(nn.Module):
                 )
                 debug_collector.record_block(
                     attn_residual=debug_tensors.attn_residual,
+                    freq_gate_low=debug_tensors.freq_gate_low,
+                    freq_gate_high=debug_tensors.freq_gate_high,
+                    mlp_residual_pre_freq_gate=debug_tensors.mlp_residual_pre_freq_gate,
+                    mlp_residual_low_pre_gate=debug_tensors.mlp_residual_low_pre_gate,
+                    mlp_residual_high_pre_gate=debug_tensors.mlp_residual_high_pre_gate,
+                    mlp_residual_low_correction=debug_tensors.mlp_residual_low_correction,
+                    mlp_residual_high_correction=debug_tensors.mlp_residual_high_correction,
                     mlp_residual=debug_tensors.mlp_residual,
-                    mlp_residual_low=debug_tensors.mlp_residual_low,
-                    mlp_residual_high=debug_tensors.mlp_residual_high,
                     block_output_tokens=debug_tensors.block_output_tokens,
                 )
             debug_collector.set_step_output_tokens(tokens)
@@ -142,6 +178,20 @@ def build_model(config: dict[str, object]) -> PixelDiT:
     if config.get("pos_embed_type", "2d_sincos") != "2d_sincos":
         raise ValueError("Only pos_embed_type='2d_sincos' is implemented.")
     spec = MODEL_SPECS[model_name]
+    freq_gate_config = config.get("freq_residual_gating")
+    if freq_gate_config is None:
+        freq_residual_gating = FreqResidualGatingConfig(enabled=False, gate_scale=None)
+    else:
+        freq_gate_config = dict(freq_gate_config)
+        if "enabled" not in freq_gate_config:
+            raise ValueError("model.freq_residual_gating.enabled must be provided when freq_residual_gating is configured.")
+        if bool(freq_gate_config["enabled"]) and "gate_scale" not in freq_gate_config:
+            raise ValueError("model.freq_residual_gating.gate_scale must be provided when freq_residual_gating.enabled=true.")
+        freq_residual_gating = FreqResidualGatingConfig(
+            enabled=bool(freq_gate_config["enabled"]),
+            gate_scale=float(freq_gate_config["gate_scale"]) if "gate_scale" in freq_gate_config else None,
+        )
+    activation_checkpointing = bool(config.get("activation_checkpointing", False))
     return PixelDiT(
         image_size=int(config["image_size"]),
         patch_size=int(config["patch_size"]),
@@ -149,4 +199,6 @@ def build_model(config: dict[str, object]) -> PixelDiT:
         num_classes=int(config["num_classes"]),
         class_dropout_prob=float(config.get("class_dropout_prob", 0.0)),
         spec=spec,
+        freq_residual_gating=freq_residual_gating,
+        activation_checkpointing=activation_checkpointing,
     )

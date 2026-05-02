@@ -128,9 +128,10 @@ def compute_pred_x0_pixels(step_xt_pixels: torch.Tensor, step_prediction_pixels:
 
 def save_block_flow_overview(
     attn_blocks: torch.Tensor,
-    mlp_blocks: torch.Tensor,
-    mlp_low_blocks: torch.Tensor,
-    mlp_high_blocks: torch.Tensor,
+    mlp_pre_blocks: torch.Tensor,
+    mlp_low_correction_blocks: torch.Tensor,
+    mlp_high_correction_blocks: torch.Tensor,
+    mlp_final_blocks: torch.Tensor,
     output_blocks: torch.Tensor,
     output_path: Path,
     grid_size: int,
@@ -143,12 +144,12 @@ def save_block_flow_overview(
     label_width = 26
     header_height = 14
     row_gap = 4
-    width = label_width + (5 * tile_size) + (4 * tile_padding)
+    width = label_width + (6 * tile_size) + (5 * tile_padding)
     height = header_height + (num_blocks * tile_size) + (max(num_blocks - 1, 0) * row_gap)
     canvas = Image.new("RGB", (width, height), color=(255, 255, 255))
     draw = ImageDraw.Draw(canvas)
 
-    column_labels = ("attn", "mlp", "mlp_low", "mlp_high", "x")
+    column_labels = ("attn", "pre", "low_corr", "high_corr", "mlp", "x")
     for column_index, label in enumerate(column_labels):
         x_offset = label_width + column_index * (tile_size + tile_padding)
         draw.text((x_offset, 1), label, fill=(0, 0, 0))
@@ -162,15 +163,19 @@ def save_block_flow_overview(
                 symmetric=True,
             ),
             normalize_rgb_stack(
-                project_token_tensor_to_rgb(mlp_blocks[block_index], grid_size, patch_size, image_size),
+                project_token_tensor_to_rgb(mlp_pre_blocks[block_index], grid_size, patch_size, image_size),
                 symmetric=True,
             ),
             normalize_rgb_stack(
-                project_token_tensor_to_rgb(mlp_low_blocks[block_index], grid_size, patch_size, image_size),
+                project_token_tensor_to_rgb(mlp_low_correction_blocks[block_index], grid_size, patch_size, image_size),
                 symmetric=True,
             ),
             normalize_rgb_stack(
-                project_token_tensor_to_rgb(mlp_high_blocks[block_index], grid_size, patch_size, image_size),
+                project_token_tensor_to_rgb(mlp_high_correction_blocks[block_index], grid_size, patch_size, image_size),
+                symmetric=True,
+            ),
+            normalize_rgb_stack(
+                project_token_tensor_to_rgb(mlp_final_blocks[block_index], grid_size, patch_size, image_size),
                 symmetric=True,
             ),
             normalize_rgb_stack(
@@ -192,8 +197,17 @@ def visualize_dump_file(dump_path: Path, input_root: Path, output_root: Path, im
     payload = torch.load(dump_path, map_location="cpu")
     if "step_xt_pixels" not in payload:
         raise ValueError(f"Dump file is missing step_xt_pixels and must be regenerated: {dump_path}")
-    if "mlp_residual_low" not in payload or "mlp_residual_high" not in payload:
-        raise ValueError(f"Dump file is missing mlp_residual_low/high and must be regenerated: {dump_path}")
+    required_keys = (
+        "mlp_residual_pre_freq_gate",
+        "mlp_residual_low_pre_gate",
+        "mlp_residual_high_pre_gate",
+        "mlp_residual_low_correction",
+        "mlp_residual_high_correction",
+        "mlp_residual",
+    )
+    missing_keys = [key for key in required_keys if key not in payload]
+    if missing_keys:
+        raise ValueError(f"Dump file is missing required keys {missing_keys} and must be regenerated: {dump_path}")
 
     meta = payload["meta"]
     grid_size = int(meta["grid_size"])
@@ -222,15 +236,36 @@ def visualize_dump_file(dump_path: Path, input_root: Path, output_root: Path, im
             image_size=image_size,
         )
         save_block_grid(
-            payload["mlp_residual_low"][:, sample_index],
-            sample_dir / "mlp_residual_low_blocks.png",
+            payload["mlp_residual_pre_freq_gate"][:, sample_index],
+            sample_dir / "mlp_residual_pre_freq_gate_blocks.png",
             grid_size=grid_size,
             patch_size=patch_size,
             image_size=image_size,
         )
         save_block_grid(
-            payload["mlp_residual_high"][:, sample_index],
-            sample_dir / "mlp_residual_high_blocks.png",
+            payload["mlp_residual_low_pre_gate"][:, sample_index],
+            sample_dir / "mlp_residual_low_pre_gate_blocks.png",
+            grid_size=grid_size,
+            patch_size=patch_size,
+            image_size=image_size,
+        )
+        save_block_grid(
+            payload["mlp_residual_high_pre_gate"][:, sample_index],
+            sample_dir / "mlp_residual_high_pre_gate_blocks.png",
+            grid_size=grid_size,
+            patch_size=patch_size,
+            image_size=image_size,
+        )
+        save_block_grid(
+            payload["mlp_residual_low_correction"][:, sample_index],
+            sample_dir / "mlp_residual_low_correction_blocks.png",
+            grid_size=grid_size,
+            patch_size=patch_size,
+            image_size=image_size,
+        )
+        save_block_grid(
+            payload["mlp_residual_high_correction"][:, sample_index],
+            sample_dir / "mlp_residual_high_correction_blocks.png",
             grid_size=grid_size,
             patch_size=patch_size,
             image_size=image_size,
@@ -244,9 +279,10 @@ def visualize_dump_file(dump_path: Path, input_root: Path, output_root: Path, im
         )
         save_block_flow_overview(
             payload["attn_residual"][:, sample_index],
+            payload["mlp_residual_pre_freq_gate"][:, sample_index],
+            payload["mlp_residual_low_correction"][:, sample_index],
+            payload["mlp_residual_high_correction"][:, sample_index],
             payload["mlp_residual"][:, sample_index],
-            payload["mlp_residual_low"][:, sample_index],
-            payload["mlp_residual_high"][:, sample_index],
             payload["block_output_tokens"][:, sample_index],
             sample_dir / "block_flow_overview.png",
             grid_size=grid_size,

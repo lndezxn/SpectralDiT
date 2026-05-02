@@ -12,6 +12,9 @@ model:
   num_classes: 10
   class_dropout_prob: 0.1
   pos_embed_type: 2d_sincos
+  freq_residual_gating:
+    enabled: false
+    gate_scale: 1.0
 
 train:
   seed: 42

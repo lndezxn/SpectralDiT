@@ -5,20 +5,21 @@ data:
   pin_memory: true
 
 model:
-  name: dit_plain_base
+  name: dit_plain_small
   image_size: 32
   patch_size: 1
   in_channels: 3
   num_classes: 10
   class_dropout_prob: 0.1
   pos_embed_type: 2d_sincos
+  activation_checkpointing: true
   freq_residual_gating:
-    enabled: false
-    gate_scale: 1.0
+    enabled: true
+    gate_scale: 0.2
 
 train:
   seed: 42
-  output_dir: outputs/cifar10_dit_base
+  output_dir: outputs/cifar10_spectraldit_small
   mixed_precision: bf16
   grad_accum_steps: 1
   max_steps: 400000

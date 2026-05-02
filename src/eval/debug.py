@@ -39,9 +39,14 @@ class SamplingDebugCollector:
         self.labels = labels.detach().cpu()
         self.meta = dict(meta)
         self._attn_residuals: list[torch.Tensor] = []
+        self._freq_gate_lows: list[torch.Tensor] = []
+        self._freq_gate_highs: list[torch.Tensor] = []
+        self._mlp_residuals_pre_freq_gate: list[torch.Tensor] = []
+        self._mlp_residuals_low_pre_gate: list[torch.Tensor] = []
+        self._mlp_residuals_high_pre_gate: list[torch.Tensor] = []
+        self._mlp_residuals_low_correction: list[torch.Tensor] = []
+        self._mlp_residuals_high_correction: list[torch.Tensor] = []
         self._mlp_residuals: list[torch.Tensor] = []
-        self._mlp_residuals_low: list[torch.Tensor] = []
-        self._mlp_residuals_high: list[torch.Tensor] = []
         self._block_outputs: list[torch.Tensor] = []
         self._step_output_tokens: torch.Tensor | None = None
         self._step_xt_pixels: torch.Tensor | None = None
@@ -50,15 +55,25 @@ class SamplingDebugCollector:
     def record_block(
         self,
         attn_residual: torch.Tensor,
+        freq_gate_low: torch.Tensor,
+        freq_gate_high: torch.Tensor,
+        mlp_residual_pre_freq_gate: torch.Tensor,
+        mlp_residual_low_pre_gate: torch.Tensor,
+        mlp_residual_high_pre_gate: torch.Tensor,
+        mlp_residual_low_correction: torch.Tensor,
+        mlp_residual_high_correction: torch.Tensor,
         mlp_residual: torch.Tensor,
-        mlp_residual_low: torch.Tensor,
-        mlp_residual_high: torch.Tensor,
         block_output_tokens: torch.Tensor,
     ) -> None:
         self._attn_residuals.append(self._prepare_tensor(attn_residual))
+        self._freq_gate_lows.append(self._prepare_tensor(freq_gate_low))
+        self._freq_gate_highs.append(self._prepare_tensor(freq_gate_high))
+        self._mlp_residuals_pre_freq_gate.append(self._prepare_tensor(mlp_residual_pre_freq_gate))
+        self._mlp_residuals_low_pre_gate.append(self._prepare_tensor(mlp_residual_low_pre_gate))
+        self._mlp_residuals_high_pre_gate.append(self._prepare_tensor(mlp_residual_high_pre_gate))
+        self._mlp_residuals_low_correction.append(self._prepare_tensor(mlp_residual_low_correction))
+        self._mlp_residuals_high_correction.append(self._prepare_tensor(mlp_residual_high_correction))
         self._mlp_residuals.append(self._prepare_tensor(mlp_residual))
-        self._mlp_residuals_low.append(self._prepare_tensor(mlp_residual_low))
-        self._mlp_residuals_high.append(self._prepare_tensor(mlp_residual_high))
         self._block_outputs.append(self._prepare_tensor(block_output_tokens))
 
     def set_step_output_tokens(self, step_output_tokens: torch.Tensor) -> None:
@@ -73,9 +88,14 @@ class SamplingDebugCollector:
     def flush_step(self, step_index: int, timestep_value: float) -> None:
         if (
             not self._attn_residuals
+            or not self._freq_gate_lows
+            or not self._freq_gate_highs
+            or not self._mlp_residuals_pre_freq_gate
+            or not self._mlp_residuals_low_pre_gate
+            or not self._mlp_residuals_high_pre_gate
+            or not self._mlp_residuals_low_correction
+            or not self._mlp_residuals_high_correction
             or not self._mlp_residuals
-            or not self._mlp_residuals_low
-            or not self._mlp_residuals_high
             or not self._block_outputs
         ):
             raise ValueError("Cannot flush debug step before any block outputs were recorded.")
@@ -90,9 +110,14 @@ class SamplingDebugCollector:
             "step_index": step_index,
             "timestep_value": timestep_value,
             "attn_residual": torch.stack(self._attn_residuals, dim=0),
+            "freq_gate_low": torch.stack(self._freq_gate_lows, dim=0),
+            "freq_gate_high": torch.stack(self._freq_gate_highs, dim=0),
+            "mlp_residual_pre_freq_gate": torch.stack(self._mlp_residuals_pre_freq_gate, dim=0),
+            "mlp_residual_low_pre_gate": torch.stack(self._mlp_residuals_low_pre_gate, dim=0),
+            "mlp_residual_high_pre_gate": torch.stack(self._mlp_residuals_high_pre_gate, dim=0),
+            "mlp_residual_low_correction": torch.stack(self._mlp_residuals_low_correction, dim=0),
+            "mlp_residual_high_correction": torch.stack(self._mlp_residuals_high_correction, dim=0),
             "mlp_residual": torch.stack(self._mlp_residuals, dim=0),
-            "mlp_residual_low": torch.stack(self._mlp_residuals_low, dim=0),
-            "mlp_residual_high": torch.stack(self._mlp_residuals_high, dim=0),
             "block_output_tokens": torch.stack(self._block_outputs, dim=0),
             "step_output_tokens": self._step_output_tokens,
             "step_xt_pixels": self._step_xt_pixels,
@@ -105,9 +130,14 @@ class SamplingDebugCollector:
 
     def _reset_step(self) -> None:
         self._attn_residuals.clear()
+        self._freq_gate_lows.clear()
+        self._freq_gate_highs.clear()
+        self._mlp_residuals_pre_freq_gate.clear()
+        self._mlp_residuals_low_pre_gate.clear()
+        self._mlp_residuals_high_pre_gate.clear()
+        self._mlp_residuals_low_correction.clear()
+        self._mlp_residuals_high_correction.clear()
         self._mlp_residuals.clear()
-        self._mlp_residuals_low.clear()
-        self._mlp_residuals_high.clear()
         self._block_outputs.clear()
         self._step_output_tokens = None
         self._step_xt_pixels = None

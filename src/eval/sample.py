@@ -43,6 +43,8 @@ def sample_euler(
                 "patch_size": int(unwrapped_model.patch_size),
                 "hidden_size": int(unwrapped_model.hidden_size),
                 "depth": len(unwrapped_model.blocks),
+                "freq_residual_gating_enabled": bool(unwrapped_model.freq_residual_gating.enabled),
+                "freq_residual_gating_scale": float(unwrapped_model.freq_residual_gating.gate_scale),
             },
         )
     for step in range(num_steps):
