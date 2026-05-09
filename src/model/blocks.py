@@ -14,6 +14,8 @@ def modulate(x: torch.Tensor, shift: torch.Tensor, scale: torch.Tensor) -> torch
 @dataclass(frozen=True)
 class BlockDebugTensors:
     attn_residual: torch.Tensor
+    freq_gate_low_logit: torch.Tensor
+    freq_gate_high_logit: torch.Tensor
     freq_gate_low: torch.Tensor
     freq_gate_high: torch.Tensor
     mlp_residual_pre_freq_gate: torch.Tensor
@@ -29,6 +31,7 @@ class BlockDebugTensors:
 class FreqResidualGatingConfig:
     enabled: bool = False
     gate_scale: float | None = None
+    condition_on: str | None = None
 
 
 def split_token_frequency(token_tensor: torch.Tensor, grid_size: int) -> tuple[torch.Tensor, torch.Tensor]:
@@ -113,29 +116,46 @@ class AdaLNZeroBlock(nn.Module):
         self.ada_ln = nn.Sequential(nn.SiLU(), nn.Linear(hidden_size, 6 * hidden_size))
         self.freq_residual_gating = freq_residual_gating or FreqResidualGatingConfig()
         self.freq_gate: nn.Sequential | None = None
+        self.freq_gate_static_logits: nn.Parameter | None = None
         if self.freq_residual_gating.enabled:
-            gate_hidden_size = hidden_size // 4
-            self.freq_gate = nn.Sequential(
-                nn.Linear(hidden_size, gate_hidden_size),
-                nn.SiLU(),
-                nn.Linear(gate_hidden_size, 2),
-            )
+            if self.freq_residual_gating.condition_on == "static":
+                self.freq_gate_static_logits = nn.Parameter(torch.zeros(2))
+            else:
+                gate_hidden_size = hidden_size // 4
+                self.freq_gate = nn.Sequential(
+                    nn.Linear(hidden_size, gate_hidden_size),
+                    nn.SiLU(),
+                    nn.Linear(gate_hidden_size, 2),
+                )
 
-    def _compute_freq_gates(self, condition: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        if self.freq_gate is None:
-            raise ValueError("freq_gate must be initialized when frequency residual gating is enabled.")
+    def _compute_freq_gates(self, condition: torch.Tensor | None) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         if self.freq_residual_gating.gate_scale is None:
             raise ValueError("freq_residual_gating.gate_scale must be provided when frequency residual gating is enabled.")
-        gate_logits = self.freq_gate(condition)
+        if self.freq_residual_gating.condition_on == "static":
+            if self.freq_gate_static_logits is None:
+                raise ValueError("freq_gate_static_logits must be initialized when condition_on='static'.")
+            if condition is None:
+                raise ValueError("A batch reference tensor must be provided when condition_on='static'.")
+            batch_size = int(condition.shape[0])
+            gate_logits = self.freq_gate_static_logits.unsqueeze(0).expand(batch_size, -1)
+        else:
+            if self.freq_gate is None:
+                raise ValueError("freq_gate must be initialized when frequency residual gating is enabled.")
+            if condition is None:
+                raise ValueError("freq_gate_condition must be provided when frequency residual gating uses input conditioning.")
+            gate_logits = self.freq_gate(condition)
         freq_gates = torch.tanh(gate_logits) * self.freq_residual_gating.gate_scale
+        gate_low_logit = gate_logits[:, 0]
+        gate_high_logit = gate_logits[:, 1]
         gate_low = freq_gates[:, 0].view(-1, 1, 1)
         gate_high = freq_gates[:, 1].view(-1, 1, 1)
-        return gate_low, gate_high
+        return gate_low, gate_high, gate_low_logit, gate_high_logit
 
     def forward(
         self,
         x: torch.Tensor,
         condition: torch.Tensor,
+        freq_gate_condition: torch.Tensor | None = None,
         return_debug_tensors: bool = False,
         token_grid_size: int | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, BlockDebugTensors]:
@@ -152,10 +172,15 @@ class AdaLNZeroBlock(nn.Module):
         mlp_residual = mlp_residual_pre_freq_gate
         gate_low: torch.Tensor | None = None
         gate_high: torch.Tensor | None = None
+        gate_low_logit: torch.Tensor | None = None
+        gate_high_logit: torch.Tensor | None = None
         if self.freq_residual_gating.enabled:
             if token_grid_size is None:
                 raise ValueError("token_grid_size must be provided when frequency residual gating is enabled.")
-            gate_low, gate_high = self._compute_freq_gates(condition)
+            if freq_gate_condition is None and self.freq_residual_gating.condition_on != "static":
+                raise ValueError("freq_gate_condition must be provided when frequency residual gating is enabled.")
+            gate_input = condition if self.freq_residual_gating.condition_on == "static" else freq_gate_condition
+            gate_low, gate_high, gate_low_logit, gate_high_logit = self._compute_freq_gates(gate_input)
             if return_debug_tensors:
                 mlp_residual_low_pre_gate, mlp_residual_high_pre_gate = split_token_frequency(
                     mlp_residual_pre_freq_gate,
@@ -186,8 +211,11 @@ class AdaLNZeroBlock(nn.Module):
         mlp_residual_low_correction: torch.Tensor | None = None
         mlp_residual_high_correction: torch.Tensor | None = None
         if self.freq_residual_gating.enabled:
-            if gate_low is None or gate_high is None:
-                gate_low, gate_high = self._compute_freq_gates(condition)
+            if gate_low is None or gate_high is None or gate_low_logit is None or gate_high_logit is None:
+                if freq_gate_condition is None and self.freq_residual_gating.condition_on != "static":
+                    raise ValueError("freq_gate_condition must be provided when frequency residual gating is enabled.")
+                gate_input = condition if self.freq_residual_gating.condition_on == "static" else freq_gate_condition
+                gate_low, gate_high, gate_low_logit, gate_high_logit = self._compute_freq_gates(gate_input)
             mlp_residual_low_pre_gate, mlp_residual_high_pre_gate = split_token_frequency(
                 mlp_residual_pre_freq_gate,
                 grid_size=token_grid_size,
@@ -201,8 +229,14 @@ class AdaLNZeroBlock(nn.Module):
             )
             mlp_residual_low_correction = torch.zeros_like(mlp_residual_pre_freq_gate)
             mlp_residual_high_correction = torch.zeros_like(mlp_residual_pre_freq_gate)
+            gate_low_logit = torch.zeros_like(condition[:, 0])
+            gate_high_logit = torch.zeros_like(condition[:, 0])
+            gate_low = torch.zeros_like(mlp_residual_pre_freq_gate[:, :1, :1])
+            gate_high = torch.zeros_like(mlp_residual_pre_freq_gate[:, :1, :1])
         return x, BlockDebugTensors(
             attn_residual=attn_residual,
+            freq_gate_low_logit=gate_low_logit,
+            freq_gate_high_logit=gate_high_logit,
             freq_gate_low=gate_low.view(-1) if gate_low is not None else torch.zeros_like(condition[:, 0]),
             freq_gate_high=gate_high.view(-1) if gate_high is not None else torch.zeros_like(condition[:, 0]),
             mlp_residual_pre_freq_gate=mlp_residual_pre_freq_gate,

@@ -7,7 +7,7 @@ data:
 model:
   name: dit_plain_small
   image_size: 32
-  patch_size: 1
+  patch_size: 4
   in_channels: 3
   num_classes: 10
   class_dropout_prob: 0.1

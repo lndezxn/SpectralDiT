@@ -9,6 +9,11 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.lines as mlines
+import matplotlib.pyplot as plt
+import seaborn as sns
 import torch
 import torch.nn.functional as F
 from PIL import Image, ImageDraw
@@ -45,6 +50,104 @@ def parse_args() -> argparse.Namespace:
 
 def list_dump_files(input_dir: Path) -> list[Path]:
     return sorted(input_dir.rglob("sample_step_*.pt"))
+
+
+def save_gate_vs_t_overview(
+    timesteps: list[float],
+    low_logits: torch.Tensor,
+    high_logits: torch.Tensor,
+    low_gates: torch.Tensor,
+    high_gates: torch.Tensor,
+    output_path: Path,
+) -> None:
+    sns.set_theme(style="whitegrid")
+    num_blocks = int(low_logits.shape[1])
+    palette = sns.color_palette("husl", num_blocks)
+    figure, axes = plt.subplots(2, 2, figsize=(14, 8), sharex=True, constrained_layout=True)
+    panels = (
+        ("Low Raw Logit", axes[0, 0], low_logits),
+        ("Low Scaled Gate", axes[0, 1], low_gates),
+        ("High Raw Logit", axes[1, 0], high_logits),
+        ("High Scaled Gate", axes[1, 1], high_gates),
+    )
+
+    block_handles: list[mlines.Line2D] = []
+    for title, axis, values in panels:
+        for block_index in range(num_blocks):
+            color = palette[block_index]
+            if len(block_handles) < num_blocks:
+                block_handles.append(mlines.Line2D([], [], color=color, linewidth=2, label=f"b{block_index}"))
+            sns.lineplot(
+                x=timesteps,
+                y=values[:, block_index].tolist(),
+                ax=axis,
+                color=color,
+                linewidth=2.0,
+                linestyle="-",
+                legend=False,
+            )
+        axis.set_title(title)
+        axis.set_ylabel("value")
+
+    axes[1, 0].set_xlabel("t")
+    axes[1, 1].set_xlabel("t")
+    figure.legend(
+        handles=block_handles,
+        loc="center left",
+        bbox_to_anchor=(1.01, 0.5),
+        frameon=False,
+    )
+    figure.savefig(output_path, dpi=180, bbox_inches="tight")
+    plt.close(figure)
+
+
+def save_gate_vs_t_overviews(
+    dump_files: list[Path],
+    output_root: Path,
+    sample_limit: int | None,
+) -> None:
+    sample_series: dict[int, dict[str, list[float] | list[torch.Tensor]]] = {}
+    for dump_path in dump_files:
+        payload = torch.load(dump_path, map_location="cpu")
+        required_keys = ("freq_gate_low_logit", "freq_gate_high_logit", "freq_gate_low", "freq_gate_high")
+        missing_keys = [key for key in required_keys if key not in payload]
+        if missing_keys:
+            raise ValueError(f"Dump file is missing required keys {missing_keys} and must be regenerated: {dump_path}")
+        batch_size = int(payload["freq_gate_low"].shape[1])
+        max_samples = batch_size if sample_limit is None else min(batch_size, sample_limit)
+        timestep_value = float(payload["timestep_value"])
+        for sample_index in range(max_samples):
+            if sample_index not in sample_series:
+                sample_series[sample_index] = {
+                    "timesteps": [],
+                    "low_logits": [],
+                    "high_logits": [],
+                    "low_gates": [],
+                    "high_gates": [],
+                }
+            sample_series[sample_index]["timesteps"].append(timestep_value)
+            sample_series[sample_index]["low_logits"].append(payload["freq_gate_low_logit"][:, sample_index])
+            sample_series[sample_index]["high_logits"].append(payload["freq_gate_high_logit"][:, sample_index])
+            sample_series[sample_index]["low_gates"].append(payload["freq_gate_low"][:, sample_index])
+            sample_series[sample_index]["high_gates"].append(payload["freq_gate_high"][:, sample_index])
+
+    for sample_index, series in sample_series.items():
+        timesteps = list(series["timesteps"])
+        order = sorted(range(len(timesteps)), key=lambda idx: timesteps[idx])
+        sorted_timesteps = [timesteps[idx] for idx in order]
+        low_logits = torch.stack([series["low_logits"][idx] for idx in order], dim=0)
+        high_logits = torch.stack([series["high_logits"][idx] for idx in order], dim=0)
+        low_gates = torch.stack([series["low_gates"][idx] for idx in order], dim=0)
+        high_gates = torch.stack([series["high_gates"][idx] for idx in order], dim=0)
+        sample_dir = ensure_dir(output_root / f"sample_{sample_index:03d}")
+        save_gate_vs_t_overview(
+            timesteps=sorted_timesteps,
+            low_logits=low_logits,
+            high_logits=high_logits,
+            low_gates=low_gates,
+            high_gates=high_gates,
+            output_path=sample_dir / "gate_vs_t_overview.png",
+        )
 
 
 def project_token_tensor_to_rgb(
@@ -198,6 +301,10 @@ def visualize_dump_file(dump_path: Path, input_root: Path, output_root: Path, im
     if "step_xt_pixels" not in payload:
         raise ValueError(f"Dump file is missing step_xt_pixels and must be regenerated: {dump_path}")
     required_keys = (
+        "freq_gate_low_logit",
+        "freq_gate_high_logit",
+        "freq_gate_low",
+        "freq_gate_high",
         "mlp_residual_pre_freq_gate",
         "mlp_residual_low_pre_gate",
         "mlp_residual_high_pre_gate",
@@ -347,6 +454,11 @@ def main() -> None:
             )
             progress.update(task_id, advance=1)
 
+    save_gate_vs_t_overviews(
+        dump_files=dump_files,
+        output_root=output_dir,
+        sample_limit=args.sample_limit,
+    )
     logger.info("Saved visualizations to %s", output_dir)
 
 

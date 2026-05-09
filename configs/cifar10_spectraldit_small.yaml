@@ -15,7 +15,8 @@ model:
   activation_checkpointing: true
   freq_residual_gating:
     enabled: true
-    gate_scale: 0.2
+    condition_on: static
+    gate_scale: 1.0
 
 train:
   seed: 42

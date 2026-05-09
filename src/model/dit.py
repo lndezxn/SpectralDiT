@@ -81,6 +81,23 @@ class PixelDiT(nn.Module):
         self.final_layer = FinalLayer(spec.hidden_size, patch_size, in_channels)
         self._initialize_weights()
 
+    def _resolve_freq_gate_condition(
+        self,
+        time_condition: torch.Tensor,
+        condition: torch.Tensor,
+    ) -> torch.Tensor | None:
+        if not self.freq_residual_gating.enabled:
+            return None
+        if self.freq_residual_gating.condition_on == "time":
+            return time_condition
+        if self.freq_residual_gating.condition_on == "time_label":
+            return condition
+        if self.freq_residual_gating.condition_on == "static":
+            return None
+        raise ValueError(
+            "freq_residual_gating.condition_on must be 'time', 'time_label', or 'static' when frequency residual gating is enabled."
+        )
+
     def _initialize_weights(self) -> None:
         for module in self.modules():
             if isinstance(module, nn.Linear):
@@ -100,6 +117,8 @@ class PixelDiT(nn.Module):
             if block.freq_gate is not None:
                 nn.init.zeros_(block.freq_gate[-1].weight)
                 nn.init.zeros_(block.freq_gate[-1].bias)
+            if block.freq_gate_static_logits is not None:
+                nn.init.zeros_(block.freq_gate_static_logits)
         nn.init.zeros_(self.final_layer.ada_ln[-1].weight)
         nn.init.zeros_(self.final_layer.ada_ln[-1].bias)
 
@@ -127,14 +146,23 @@ class PixelDiT(nn.Module):
     ) -> torch.Tensor:
         tokens = self.patch_embed(x)
         tokens = tokens + self.pos_embed.to(dtype=tokens.dtype, device=tokens.device)
-        condition = self.time_embed(timesteps) + self.label_embed(labels)
+        time_condition = self.time_embed(timesteps)
+        condition = time_condition + self.label_embed(labels)
+        freq_gate_condition = self._resolve_freq_gate_condition(time_condition, condition)
         if debug_collector is None:
             for block in self.blocks:
                 if self.training and self.activation_checkpointing:
-                    def run_block(block_tokens: torch.Tensor, block_condition: torch.Tensor, *, current_block: nn.Module = block) -> torch.Tensor:
+                    def run_block(
+                        block_tokens: torch.Tensor,
+                        block_condition: torch.Tensor,
+                        block_freq_gate_condition: torch.Tensor | None,
+                        *,
+                        current_block: nn.Module = block,
+                    ) -> torch.Tensor:
                         return current_block(
                             block_tokens,
                             block_condition,
+                            freq_gate_condition=block_freq_gate_condition,
                             token_grid_size=self.grid_size,
                         )
 
@@ -142,20 +170,29 @@ class PixelDiT(nn.Module):
                         run_block,
                         tokens,
                         condition,
+                        freq_gate_condition,
                         use_reentrant=False,
                     )
                 else:
-                    tokens = block(tokens, condition, token_grid_size=self.grid_size)
+                    tokens = block(
+                        tokens,
+                        condition,
+                        freq_gate_condition=freq_gate_condition,
+                        token_grid_size=self.grid_size,
+                    )
         else:
             for block in self.blocks:
                 tokens, debug_tensors = block(
                     tokens,
                     condition,
+                    freq_gate_condition=freq_gate_condition,
                     return_debug_tensors=True,
                     token_grid_size=self.grid_size,
                 )
                 debug_collector.record_block(
                     attn_residual=debug_tensors.attn_residual,
+                    freq_gate_low_logit=debug_tensors.freq_gate_low_logit,
+                    freq_gate_high_logit=debug_tensors.freq_gate_high_logit,
                     freq_gate_low=debug_tensors.freq_gate_low,
                     freq_gate_high=debug_tensors.freq_gate_high,
                     mlp_residual_pre_freq_gate=debug_tensors.mlp_residual_pre_freq_gate,
@@ -180,16 +217,23 @@ def build_model(config: dict[str, object]) -> PixelDiT:
     spec = MODEL_SPECS[model_name]
     freq_gate_config = config.get("freq_residual_gating")
     if freq_gate_config is None:
-        freq_residual_gating = FreqResidualGatingConfig(enabled=False, gate_scale=None)
+        freq_residual_gating = FreqResidualGatingConfig(enabled=False, gate_scale=None, condition_on=None)
     else:
         freq_gate_config = dict(freq_gate_config)
         if "enabled" not in freq_gate_config:
             raise ValueError("model.freq_residual_gating.enabled must be provided when freq_residual_gating is configured.")
         if bool(freq_gate_config["enabled"]) and "gate_scale" not in freq_gate_config:
             raise ValueError("model.freq_residual_gating.gate_scale must be provided when freq_residual_gating.enabled=true.")
+        if bool(freq_gate_config["enabled"]) and "condition_on" not in freq_gate_config:
+            raise ValueError(
+                "model.freq_residual_gating.condition_on must be provided when freq_residual_gating.enabled=true."
+            )
+        if "condition_on" in freq_gate_config and str(freq_gate_config["condition_on"]) not in {"time", "time_label", "static"}:
+            raise ValueError("model.freq_residual_gating.condition_on must be one of: time, time_label, static.")
         freq_residual_gating = FreqResidualGatingConfig(
             enabled=bool(freq_gate_config["enabled"]),
             gate_scale=float(freq_gate_config["gate_scale"]) if "gate_scale" in freq_gate_config else None,
+            condition_on=str(freq_gate_config["condition_on"]) if "condition_on" in freq_gate_config else None,
         )
     activation_checkpointing = bool(config.get("activation_checkpointing", False))
     return PixelDiT(

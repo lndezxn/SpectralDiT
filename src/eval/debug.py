@@ -39,6 +39,8 @@ class SamplingDebugCollector:
         self.labels = labels.detach().cpu()
         self.meta = dict(meta)
         self._attn_residuals: list[torch.Tensor] = []
+        self._freq_gate_low_logits: list[torch.Tensor] = []
+        self._freq_gate_high_logits: list[torch.Tensor] = []
         self._freq_gate_lows: list[torch.Tensor] = []
         self._freq_gate_highs: list[torch.Tensor] = []
         self._mlp_residuals_pre_freq_gate: list[torch.Tensor] = []
@@ -55,6 +57,8 @@ class SamplingDebugCollector:
     def record_block(
         self,
         attn_residual: torch.Tensor,
+        freq_gate_low_logit: torch.Tensor,
+        freq_gate_high_logit: torch.Tensor,
         freq_gate_low: torch.Tensor,
         freq_gate_high: torch.Tensor,
         mlp_residual_pre_freq_gate: torch.Tensor,
@@ -66,6 +70,8 @@ class SamplingDebugCollector:
         block_output_tokens: torch.Tensor,
     ) -> None:
         self._attn_residuals.append(self._prepare_tensor(attn_residual))
+        self._freq_gate_low_logits.append(self._prepare_tensor(freq_gate_low_logit))
+        self._freq_gate_high_logits.append(self._prepare_tensor(freq_gate_high_logit))
         self._freq_gate_lows.append(self._prepare_tensor(freq_gate_low))
         self._freq_gate_highs.append(self._prepare_tensor(freq_gate_high))
         self._mlp_residuals_pre_freq_gate.append(self._prepare_tensor(mlp_residual_pre_freq_gate))
@@ -88,6 +94,8 @@ class SamplingDebugCollector:
     def flush_step(self, step_index: int, timestep_value: float) -> None:
         if (
             not self._attn_residuals
+            or not self._freq_gate_low_logits
+            or not self._freq_gate_high_logits
             or not self._freq_gate_lows
             or not self._freq_gate_highs
             or not self._mlp_residuals_pre_freq_gate
@@ -110,6 +118,8 @@ class SamplingDebugCollector:
             "step_index": step_index,
             "timestep_value": timestep_value,
             "attn_residual": torch.stack(self._attn_residuals, dim=0),
+            "freq_gate_low_logit": torch.stack(self._freq_gate_low_logits, dim=0),
+            "freq_gate_high_logit": torch.stack(self._freq_gate_high_logits, dim=0),
             "freq_gate_low": torch.stack(self._freq_gate_lows, dim=0),
             "freq_gate_high": torch.stack(self._freq_gate_highs, dim=0),
             "mlp_residual_pre_freq_gate": torch.stack(self._mlp_residuals_pre_freq_gate, dim=0),
@@ -130,6 +140,8 @@ class SamplingDebugCollector:
 
     def _reset_step(self) -> None:
         self._attn_residuals.clear()
+        self._freq_gate_low_logits.clear()
+        self._freq_gate_high_logits.clear()
         self._freq_gate_lows.clear()
         self._freq_gate_highs.clear()
         self._mlp_residuals_pre_freq_gate.clear()
