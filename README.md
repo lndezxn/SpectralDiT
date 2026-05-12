@@ -1,5 +1,7 @@
 # SpectralDiT
 
+## Training
+
 ```bash
 python scripts/train.py --config configs/cifar10_dit_small.yaml
 ```
@@ -16,6 +18,8 @@ python scripts/train.py --config configs/cifar10_dit_small.yaml
 ```
 Resume training from an existing checkpoint by setting `train.resume_from` in the config first.
 
+## Sampling
+
 ```bash
 python scripts/sample.py --config configs/cifar10_dit_small.yaml --ckpt outputs/cifar10_dit_small/checkpoints/step_0001000/checkpoint.pt
 ```
@@ -25,6 +29,15 @@ Sample images from a checkpoint and save the image grid under `train.output_dir/
 python scripts/sample.py --config configs/cifar10_dit_small.yaml --ckpt outputs/cifar10_dit_small/checkpoints/step_0001000/checkpoint.pt --label 3
 ```
 Sample only a specified class label instead of cycling through all classes.
+
+## Evaluation
+
+```bash
+python scripts/evaluate_dit.py --ckpt outputs/cifar10_dit_small/checkpoints/step_0001000/checkpoint.pt
+```
+Evaluate a checkpoint with FID, Fourier spectrum, high-frequency energy, and edge statistics using 10000 generated and 10000 real samples by default. The script loads `config_resolved.yaml` from the checkpoint case directory unless `--config` is provided.
+
+## Debug Visualization
 
 ```bash
 python scripts/sample.py --config configs/cifar10_dit_small.yaml --ckpt outputs/cifar10_dit_small/checkpoints/step_0001000/checkpoint.pt
@@ -36,6 +49,8 @@ Sample with debug dumping enabled to save per-step token and pixel-space interme
 python scripts/visualize_debug.py --input outputs/cifar10_dit_small/manual_samples/debug_tokens
 ```
 Render PNG visualizations from saved debug `.pt` dumps.
+
+## Monitoring
 
 ```bash
 tensorboard --logdir outputs/cifar10_dit_small
