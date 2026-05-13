@@ -20,6 +20,9 @@ def sample_euler(
     num_steps: int,
     device: torch.device,
     dtype: torch.dtype,
+    num_classes: int | None = None,
+    cfg_scale: float = 1.0,
+    clamp: bool = True,
     debug_output_dir: str | Path | None = None,
     debug_config: dict[str, Any] | None = None,
 ) -> torch.Tensor:
@@ -57,13 +60,21 @@ def sample_euler(
         )
         with autocast_context:
             velocity = model(x, t, labels, debug_collector=collector)
+            if cfg_scale != 1.0:
+                if num_classes is None:
+                    raise ValueError("num_classes must be provided when cfg_scale != 1.0.")
+                unconditional_labels = torch.full_like(labels, num_classes)
+                unconditional_velocity = model(x, t, unconditional_labels)
+                velocity = unconditional_velocity + cfg_scale * (velocity - unconditional_velocity)
         if collector is not None:
             collector.set_step_xt_pixels(x)
             collector.set_step_prediction_pixels(velocity)
         x = x + step_size * velocity
         if collector is not None:
             collector.flush_step(step_index=step, timestep_value=timestep_value)
-    return x.clamp(-1.0, 1.0)
+    if clamp:
+        return x.clamp(-1.0, 1.0)
+    return x
 
 
 def make_label_batch(num_samples: int, num_classes: int, device: torch.device) -> torch.Tensor:

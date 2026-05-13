@@ -14,6 +14,7 @@ from torchvision.utils import make_grid
 
 from src.eval.debug import resolve_debug_config
 from src.eval.sample import make_label_batch, sample_euler
+from src.eval.vae import decode_latents, load_vae
 from src.model.dit import build_model
 from src.train.ema import create_ema_model
 from src.utils.checkpoint import load_checkpoint
@@ -21,7 +22,7 @@ from src.utils.config import ensure_dir, load_config
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Sample images from a trained pixel-space DiT.")
+    parser = argparse.ArgumentParser(description="Sample images from a trained DiT.")
     parser.add_argument("--config", type=str, required=True, help="Path to a YAML config.")
     parser.add_argument("--ckpt", type=str, required=True, help="Path to a checkpoint file.")
     parser.add_argument("--num-samples", type=int, default=None, help="Override sample count.")
@@ -50,6 +51,8 @@ def main() -> None:
     output_dir = ensure_dir(Path(config["train"]["output_dir"]) / "manual_samples")
     if debug_config["enabled"]:
         debug_output_dir = output_dir / str(debug_config["output_subdir"])
+    data_config = config["data"]
+    is_latent = str(data_config.get("type", "cifar10")) == "imagenet100_latents"
     samples = sample_euler(
         model=ema_model,
         num_samples=num_samples,
@@ -59,9 +62,20 @@ def main() -> None:
         num_steps=int(config["sample"]["num_steps"]),
         device=device,
         dtype=torch.float32,
+        num_classes=int(config["model"]["num_classes"]),
+        cfg_scale=float(config["sample"].get("cfg_scale", 1.0)),
+        clamp=not is_latent,
         debug_output_dir=debug_output_dir,
         debug_config=debug_config,
     )
+    if is_latent:
+        vae = load_vae(data_config["vae"], device)
+        samples = decode_latents(
+            vae=vae,
+            latents=samples,
+            scaling_factor=float(data_config["scaling_factor"]),
+            dtype=torch.bfloat16,
+        )
 
     grid = make_grid(samples.cpu(), nrow=min(8, num_samples), normalize=True, value_range=(-1, 1))
     image = (grid.clamp(0.0, 1.0) * 255).round().byte().permute(1, 2, 0).numpy()

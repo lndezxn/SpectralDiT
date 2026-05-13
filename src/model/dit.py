@@ -22,6 +22,7 @@ class DiTSpec:
 MODEL_SPECS: dict[str, DiTSpec] = {
     "dit_plain_small": DiTSpec(depth=8, hidden_size=192, num_heads=4, mlp_ratio=4.0),
     "dit_plain_base": DiTSpec(depth=12, hidden_size=768, num_heads=12, mlp_ratio=4.0),
+    "dit_s2": DiTSpec(depth=12, hidden_size=384, num_heads=6, mlp_ratio=4.0),
 }
 
 

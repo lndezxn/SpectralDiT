@@ -16,9 +16,15 @@ from torchvision.utils import make_grid
 import torchvision
 
 from src.data.cifar10 import build_dataloader
+from src.data.imagenet100 import (
+    build_imagenet100_image_dataloader,
+    build_imagenet100_latent_dataloader,
+    resolve_imagenet100_latent_paths,
+)
 from src.eval.debug import resolve_debug_config
 from src.eval.metrics import GenerativeMetrics
 from src.eval.sample import make_label_batch, sample_euler
+from src.eval.vae import decode_latents, load_vae
 from src.model.dit import build_model
 from src.train.ema import create_ema_model, update_ema
 from src.train.fm import flow_matching_loss, sample_flow_matching_inputs
@@ -90,27 +96,59 @@ class Trainer:
         self.device = self.accelerator.device
 
         data_config = config["data"]
-        self.train_loader = build_dataloader(
-            root=data_config["root"],
-            train=True,
-            batch_size=int(data_config["batch_size"]),
-            num_workers=int(data_config["num_workers"]),
-            pin_memory=bool(data_config["pin_memory"]),
-        )
-        self.eval_loader = build_dataloader(
-            root=data_config["root"],
-            train=False,
-            batch_size=int(config["eval"]["batch_size"]),
-            num_workers=int(data_config["num_workers"]),
-            pin_memory=bool(data_config["pin_memory"]),
-        )
-        self.metric_loader = build_dataloader(
-            root=data_config["root"],
-            train=False,
-            batch_size=int(config["eval"]["batch_size"]),
-            num_workers=int(data_config["num_workers"]),
-            pin_memory=bool(data_config["pin_memory"]),
-        )
+        self.data_type = str(data_config.get("type", "cifar10"))
+        self.vae = None
+        if self.data_type == "cifar10":
+            self.train_loader = build_dataloader(
+                root=data_config["root"],
+                train=True,
+                batch_size=int(data_config["batch_size"]),
+                num_workers=int(data_config["num_workers"]),
+                pin_memory=bool(data_config["pin_memory"]),
+            )
+            self.eval_loader = build_dataloader(
+                root=data_config["root"],
+                train=False,
+                batch_size=int(config["eval"]["batch_size"]),
+                num_workers=int(data_config["num_workers"]),
+                pin_memory=bool(data_config["pin_memory"]),
+            )
+            self.metric_loader = build_dataloader(
+                root=data_config["root"],
+                train=False,
+                batch_size=int(config["eval"]["batch_size"]),
+                num_workers=int(data_config["num_workers"]),
+                pin_memory=bool(data_config["pin_memory"]),
+            )
+        elif self.data_type == "imagenet100_latents":
+            train_latents, validation_latents = resolve_imagenet100_latent_paths(data_config)
+            self.train_loader = build_imagenet100_latent_dataloader(
+                path=train_latents,
+                batch_size=int(data_config["batch_size"]),
+                shuffle=True,
+                num_workers=int(data_config["num_workers"]),
+                pin_memory=bool(data_config["pin_memory"]),
+                drop_last=True,
+            )
+            self.eval_loader = build_imagenet100_latent_dataloader(
+                path=validation_latents,
+                batch_size=int(config["eval"]["batch_size"]),
+                shuffle=False,
+                num_workers=int(data_config["num_workers"]),
+                pin_memory=bool(data_config["pin_memory"]),
+                drop_last=False,
+            )
+            self.metric_loader = build_imagenet100_image_dataloader(
+                root=data_config["image_root"],
+                split=str(config["eval"].get("real_split", "validation")),
+                batch_size=int(config["eval"]["batch_size"]),
+                num_workers=int(config["eval"].get("num_workers", 0)),
+                pin_memory=bool(data_config["pin_memory"]),
+                limit=int(config["eval"]["num_real"]) if config["eval"].get("num_real") is not None else None,
+            )
+            self.vae = load_vae(data_config["vae"], self.device)
+        else:
+            raise ValueError(f"Unknown data.type: {self.data_type}")
 
         self.model = build_model(config["model"])
         self.ema_model = create_ema_model(self.model)
@@ -367,6 +405,7 @@ class Trainer:
         eval_config = self.config["eval"]
         model_config = self.config["model"]
         sample_config = self.config["sample"]
+        data_config = self.config["data"]
         debug_config = resolve_debug_config(sample_config)
         total_samples = int(eval_config["fid_num_samples"])
         batch_size = int(eval_config["sample_batch_size"])
@@ -393,10 +432,23 @@ class Trainer:
                 num_steps=int(sample_config["num_steps"]),
                 device=self.device,
                 dtype=dtype,
+                num_classes=int(model_config["num_classes"]),
+                cfg_scale=float(sample_config.get("cfg_scale", 1.0)),
+                clamp=self.data_type != "imagenet100_latents",
                 debug_output_dir=debug_output_dir,
                 debug_config=debug_config,
             )
-            samples = samples.float()
+            if self.data_type == "imagenet100_latents":
+                if self.vae is None:
+                    raise ValueError("VAE must be loaded for ImageNet-100 latent evaluation.")
+                samples = decode_latents(
+                    vae=self.vae,
+                    latents=samples,
+                    scaling_factor=float(data_config["scaling_factor"]),
+                    dtype=_resolve_dtype(str(eval_config.get("decode_dtype", "bf16"))),
+                )
+            else:
+                samples = samples.float()
             if preview_batch is None:
                 preview_batch = samples[: min(64, samples.shape[0])].cpu()
             self.metrics.update_fake(samples)

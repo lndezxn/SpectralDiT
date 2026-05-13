@@ -1,11 +1,43 @@
 # SpectralDiT
 
+## Data Preprocessing
+
+```bash
+python scripts/preprocess_imagenet100.py
+```
+Preprocess the local ImageNet-100 parquet dataset to `datasets/imagenet-100/processed/imagenet-100_256` by resizing each image's shorter side to 256 pixels, center-cropping to 256x256, and storing normalized float32 CHW images in [-1, 1].
+
+```bash
+python scripts/preprocess_imagenet100.py --output datasets/imagenet-100/processed/imagenet-100_256 --overwrite
+```
+Regenerate the processed ImageNet-100 dataset when the output directory already exists.
+
+```bash
+python scripts/preprocess_imagenet100_latents.py
+```
+Encode the processed ImageNet-100 images with `datasets/vae` into scaled 32x32 SD VAE latents, saved as `train.pt` and `validation.pt` under `datasets/imagenet-100/processed/imagenet-100_vae_latents_32`.
+
+```bash
+python scripts/preprocess_imagenet100_latents.py --limit 16 --output /tmp/imagenet-100_vae_latents_32_test --overwrite
+```
+Run a small latent preprocessing smoke test before encoding the full dataset.
+
 ## Training
 
 ```bash
 python scripts/train.py --config configs/cifar10_dit_small.yaml
 ```
 Start single-process training with the default DiT-small config.
+
+```bash
+accelerate launch scripts/train.py --config configs/imagenet100_dit_s2.yaml
+```
+Train the ImageNet-100 latent DiT-S/2 baseline.
+
+```bash
+accelerate launch scripts/train.py --config configs/imagenet100_spectraldit_s2.yaml
+```
+Train the ImageNet-100 latent SpectralDiT-S/2 model with time-conditioned spectral gates at scale 1.0.
 
 ```bash
 accelerate launch scripts/train.py --config configs/cifar10_dit_small.yaml
@@ -24,6 +56,11 @@ Resume training from an existing checkpoint by setting `train.resume_from` in th
 python scripts/sample.py --config configs/cifar10_dit_small.yaml --ckpt outputs/cifar10_dit_small/checkpoints/step_0001000/checkpoint.pt
 ```
 Sample images from a checkpoint and save the image grid under `train.output_dir/manual_samples`.
+
+```bash
+python scripts/sample.py --config configs/imagenet100_dit_s2.yaml --ckpt outputs/imagenet100_dit_s2/checkpoints/step_0010000/checkpoint.pt
+```
+Sample ImageNet-100 latent checkpoints, decode the generated latents through `datasets/vae`, and save a 256x256 image grid.
 
 ```bash
 python scripts/sample.py --config configs/cifar10_dit_small.yaml --ckpt outputs/cifar10_dit_small/checkpoints/step_0001000/checkpoint.pt --label 3
@@ -45,6 +82,11 @@ Sample multiple checkpoints with each checkpoint run's `config_resolved.yaml`, t
 python scripts/evaluate_dit.py --ckpt outputs/cifar10_dit_small/checkpoints/step_0001000/checkpoint.pt
 ```
 Evaluate a checkpoint with FID, Inception Score, precision/recall, Fourier spectrum, high-frequency energy, and edge statistics using 10000 generated and 10000 real samples by default. The script loads `config_resolved.yaml` from the checkpoint case directory unless `--config` is provided.
+
+```bash
+python scripts/evaluate_dit.py --ckpt outputs/imagenet100_dit_s2/checkpoints/step_0400000/checkpoint.pt
+```
+Run offline ImageNet-100 latent evaluation with 50000 generated decoded images and all processed train plus validation images as the real reference set by default.
 
 ```bash
 python scripts/plot_radial_spectrum.py outputs/metrics/patch_1.json outputs/metrics/patch_4.json --output outputs/metrics/radial_spectrum.png
