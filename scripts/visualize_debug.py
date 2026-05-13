@@ -63,7 +63,8 @@ def save_gate_vs_t_overview(
     sns.set_theme(style="whitegrid")
     num_blocks = int(low_logits.shape[1])
     palette = sns.color_palette("husl", num_blocks)
-    figure, axes = plt.subplots(2, 2, figsize=(14, 8), sharex=True, constrained_layout=True)
+    figure, axes = plt.subplots(2, 2, figsize=(10, 7), sharex=True, constrained_layout=False)
+    figure.subplots_adjust(left=0.08, right=0.98, top=0.94, bottom=0.18, wspace=0.18, hspace=0.25)
     panels = (
         ("Low Raw Logit", axes[0, 0], low_logits),
         ("Low Scaled Gate", axes[0, 1], low_gates),
@@ -76,7 +77,7 @@ def save_gate_vs_t_overview(
         for block_index in range(num_blocks):
             color = palette[block_index]
             if len(block_handles) < num_blocks:
-                block_handles.append(mlines.Line2D([], [], color=color, linewidth=2, label=f"b{block_index}"))
+                block_handles.append(mlines.Line2D([], [], color=color, linewidth=2, label=f"Block {block_index}"))
             sns.lineplot(
                 x=timesteps,
                 y=values[:, block_index].tolist(),
@@ -85,19 +86,25 @@ def save_gate_vs_t_overview(
                 linewidth=2.0,
                 linestyle="-",
                 legend=False,
-            )
+        )
         axis.set_title(title)
-        axis.set_ylabel("value")
+        axis.set_xlim(0.0, 1.0)
 
+    axes[0, 0].set_ylabel("value")
+    axes[1, 0].set_ylabel("value")
+    axes[0, 1].set_ylabel("")
+    axes[1, 1].set_ylabel("")
     axes[1, 0].set_xlabel("t")
     axes[1, 1].set_xlabel("t")
     figure.legend(
         handles=block_handles,
-        loc="center left",
-        bbox_to_anchor=(1.01, 0.5),
+        loc="lower center",
+        bbox_to_anchor=(0.08, 0.04, 0.90, 0.08),
+        ncol=num_blocks,
+        mode="expand",
         frameon=False,
     )
-    figure.savefig(output_path, dpi=180, bbox_inches="tight")
+    figure.savefig(output_path, dpi=180)
     plt.close(figure)
 
 
@@ -146,7 +153,7 @@ def save_gate_vs_t_overviews(
             high_logits=high_logits,
             low_gates=low_gates,
             high_gates=high_gates,
-            output_path=sample_dir / "gate_vs_t_overview.png",
+            output_path=sample_dir / "gate_vs_t_overview.pdf",
         )
 
 
@@ -192,9 +199,11 @@ def save_rgb_image(rgb_tensor: torch.Tensor, output_path: Path) -> None:
     Image.fromarray(image).save(output_path)
 
 
-def save_block_grid(
+def save_block_visualizations(
     token_blocks: torch.Tensor,
-    output_path: Path,
+    output_dir: Path,
+    name: str,
+    grid_filename: str,
     grid_size: int,
     patch_size: int,
     image_size: int,
@@ -203,10 +212,18 @@ def save_block_grid(
         [project_token_tensor_to_rgb(block_tokens, grid_size, patch_size, image_size) for block_tokens in token_blocks],
         dim=0,
     )
-    rendered_blocks = normalize_rgb_stack(rendered_blocks, symmetric=True)
-    nrow = math.ceil(math.sqrt(rendered_blocks.shape[0]))
-    grid = make_grid(rendered_blocks, nrow=nrow, padding=2)
-    save_rgb_image(grid, output_path)
+    grid_blocks = normalize_rgb_stack(rendered_blocks, symmetric=True)
+
+    nrow = math.ceil(math.sqrt(grid_blocks.shape[0]))
+    grid = make_grid(grid_blocks, nrow=nrow, padding=2)
+    save_rgb_image(grid, output_dir / grid_filename)
+
+    block_dir = ensure_dir(output_dir / name)
+    for block_index, rendered_block in enumerate(rendered_blocks):
+        save_rgb_image(
+            normalize_rgb_stack(rendered_block, symmetric=True),
+            block_dir / f"block_{block_index:03d}.png",
+        )
 
 
 def save_single_token_map(
@@ -236,6 +253,8 @@ def save_block_flow_overview(
     mlp_high_correction_blocks: torch.Tensor,
     mlp_final_blocks: torch.Tensor,
     output_blocks: torch.Tensor,
+    freq_gate_low: torch.Tensor,
+    freq_gate_high: torch.Tensor,
     output_path: Path,
     grid_size: int,
     patch_size: int,
@@ -291,9 +310,25 @@ def save_block_flow_overview(
             tile = Image.fromarray((block_image.clamp(0.0, 1.0) * 255).round().byte().permute(1, 2, 0).numpy())
             if tile_size != image_size:
                 tile = tile.resize((tile_size, tile_size), resample=Image.Resampling.NEAREST)
+            if column_index == 2:
+                draw_tile_delta(tile, f"{float(freq_gate_low[block_index].squeeze()):+.3f}")
+            if column_index == 3:
+                draw_tile_delta(tile, f"{float(freq_gate_high[block_index].squeeze()):+.3f}")
             canvas.paste(tile, (x_offset, row_y))
 
     canvas.save(output_path)
+
+
+def draw_tile_delta(tile: Image.Image, text: str) -> None:
+    draw = ImageDraw.Draw(tile)
+    text_box = draw.textbbox((0, 0), text)
+    text_width = text_box[2] - text_box[0]
+    text_height = text_box[3] - text_box[1]
+    padding = 2
+    x = tile.width - text_width - padding
+    y = tile.height - text_height - padding
+    draw.rectangle((x - padding, y - padding, tile.width, tile.height), fill=(255, 255, 255))
+    draw.text((x, y), text, fill=(0, 0, 0))
 
 
 def visualize_dump_file(dump_path: Path, input_root: Path, output_root: Path, image_size_override: int | None, sample_limit: int | None) -> None:
@@ -328,62 +363,32 @@ def visualize_dump_file(dump_path: Path, input_root: Path, output_root: Path, im
     step_dir = ensure_dir(output_root / relative_parent / dump_path.stem)
     for sample_index in range(max_samples):
         sample_dir = ensure_dir(step_dir / f"sample_{sample_index:03d}")
-        save_block_grid(
-            payload["attn_residual"][:, sample_index],
-            sample_dir / "attn_residual_blocks.png",
-            grid_size=grid_size,
-            patch_size=patch_size,
-            image_size=image_size,
+        raw_image_dir = ensure_dir(sample_dir / "raw_images")
+        block_tensor_names = (
+            "attn_residual",
+            "mlp_residual",
+            "mlp_residual_pre_freq_gate",
+            "mlp_residual_low_pre_gate",
+            "mlp_residual_high_pre_gate",
+            "mlp_residual_low_correction",
+            "mlp_residual_high_correction",
+            "block_output_tokens",
         )
-        save_block_grid(
-            payload["mlp_residual"][:, sample_index],
-            sample_dir / "mlp_residual_blocks.png",
-            grid_size=grid_size,
-            patch_size=patch_size,
-            image_size=image_size,
-        )
-        save_block_grid(
-            payload["mlp_residual_pre_freq_gate"][:, sample_index],
-            sample_dir / "mlp_residual_pre_freq_gate_blocks.png",
-            grid_size=grid_size,
-            patch_size=patch_size,
-            image_size=image_size,
-        )
-        save_block_grid(
-            payload["mlp_residual_low_pre_gate"][:, sample_index],
-            sample_dir / "mlp_residual_low_pre_gate_blocks.png",
-            grid_size=grid_size,
-            patch_size=patch_size,
-            image_size=image_size,
-        )
-        save_block_grid(
-            payload["mlp_residual_high_pre_gate"][:, sample_index],
-            sample_dir / "mlp_residual_high_pre_gate_blocks.png",
-            grid_size=grid_size,
-            patch_size=patch_size,
-            image_size=image_size,
-        )
-        save_block_grid(
-            payload["mlp_residual_low_correction"][:, sample_index],
-            sample_dir / "mlp_residual_low_correction_blocks.png",
-            grid_size=grid_size,
-            patch_size=patch_size,
-            image_size=image_size,
-        )
-        save_block_grid(
-            payload["mlp_residual_high_correction"][:, sample_index],
-            sample_dir / "mlp_residual_high_correction_blocks.png",
-            grid_size=grid_size,
-            patch_size=patch_size,
-            image_size=image_size,
-        )
-        save_block_grid(
-            payload["block_output_tokens"][:, sample_index],
-            sample_dir / "block_output_tokens.png",
-            grid_size=grid_size,
-            patch_size=patch_size,
-            image_size=image_size,
-        )
+        for block_tensor_name in block_tensor_names:
+            grid_filename = (
+                "block_output_tokens.png"
+                if block_tensor_name == "block_output_tokens"
+                else f"{block_tensor_name}_blocks.png"
+            )
+            save_block_visualizations(
+                payload[block_tensor_name][:, sample_index],
+                output_dir=raw_image_dir,
+                name=block_tensor_name,
+                grid_filename=grid_filename,
+                grid_size=grid_size,
+                patch_size=patch_size,
+                image_size=image_size,
+            )
         save_block_flow_overview(
             payload["attn_residual"][:, sample_index],
             payload["mlp_residual_pre_freq_gate"][:, sample_index],
@@ -391,6 +396,8 @@ def visualize_dump_file(dump_path: Path, input_root: Path, output_root: Path, im
             payload["mlp_residual_high_correction"][:, sample_index],
             payload["mlp_residual"][:, sample_index],
             payload["block_output_tokens"][:, sample_index],
+            payload["freq_gate_low"][:, sample_index],
+            payload["freq_gate_high"][:, sample_index],
             sample_dir / "block_flow_overview.png",
             grid_size=grid_size,
             patch_size=patch_size,
@@ -398,18 +405,18 @@ def visualize_dump_file(dump_path: Path, input_root: Path, output_root: Path, im
         )
         save_single_token_map(
             payload["step_output_tokens"][sample_index],
-            sample_dir / "step_output_tokens.png",
+            raw_image_dir / "step_output_tokens.png",
             grid_size=grid_size,
             patch_size=patch_size,
             image_size=image_size,
         )
         save_pixel_prediction(
             payload["step_xt_pixels"][sample_index],
-            sample_dir / "step_xt_pixels.png",
+            raw_image_dir / "step_xt_pixels.png",
         )
         save_pixel_prediction(
             payload["step_prediction_pixels"][sample_index],
-            sample_dir / "step_prediction_pixels.png",
+            raw_image_dir / "step_prediction_pixels.png",
         )
         save_pixel_prediction(
             compute_pred_x0_pixels(
@@ -417,7 +424,7 @@ def visualize_dump_file(dump_path: Path, input_root: Path, output_root: Path, im
                 payload["step_prediction_pixels"][sample_index],
                 timestep_value=timestep_value,
             ),
-            sample_dir / "step_pred_x0_pixels.png",
+            raw_image_dir / "step_pred_x0_pixels.png",
         )
 
 

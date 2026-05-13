@@ -15,6 +15,9 @@ from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn, TimeEl
 from rich.table import Table
 from torch.utils.data import DataLoader, Subset
 from torchmetrics.image.fid import FrechetInceptionDistance
+from torch_fidelity.metric_isc import isc_features_to_metric
+from torch_fidelity.metric_prc import prc_features_to_metric
+from torch_fidelity.utils import create_feature_extractor
 
 from src.data.cifar10 import build_cifar10_dataset
 from src.eval.metrics import to_uint8_images
@@ -42,6 +45,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--label", type=int, default=None, help="Optional class label to use for every generated sample.")
     parser.add_argument("--batch-size", type=int, default=None, help="Evaluation batch size.")
     parser.add_argument("--hf-threshold", type=float, default=0.5, help="High-frequency threshold as a radial fraction.")
+    parser.add_argument("--pr-neighborhood", type=int, default=3, help="Neighborhood size for precision/recall.")
+    parser.add_argument("--pr-batch-size", type=int, default=10000, help="Distance batch size for precision/recall.")
     parser.add_argument("--output", type=str, default=None, help="Optional path to save metrics as JSON.")
     return parser.parse_args()
 
@@ -99,8 +104,10 @@ def build_radial_spectrum_payload(
     real_spectrum = finalize_state(real_state)["radial_spectrum"].detach().cpu()
     generated_spectrum = finalize_state(generated_state)["radial_spectrum"].detach().cpu()
     radius_bins = torch.arange(real_spectrum.shape[0], dtype=torch.float32)
+    normalized_radius = radius_bins / radius_bins.max().clamp_min(1.0)
     return {
         "radius_bins": [float(value) for value in radius_bins.tolist()],
+        "normalized_radius": [float(value) for value in normalized_radius.tolist()],
         "real": [float(value) for value in real_spectrum.tolist()],
         "generated": [float(value) for value in generated_spectrum.tolist()],
         "log_real": [float(value) for value in torch.log(real_spectrum.clamp_min(eps)).tolist()],
@@ -124,6 +131,8 @@ def save_metrics(
         "num_real": args.num_real,
         "real_split": args.real_split,
         "hf_threshold": args.hf_threshold,
+        "pr_neighborhood": args.pr_neighborhood,
+        "pr_batch_size": args.pr_batch_size,
         "metrics": metrics,
         "radial_spectrum": radial_spectrum,
     }
@@ -153,8 +162,17 @@ def main() -> None:
 
     real_loader = build_real_loader(config, args.real_split, args.num_real, batch_size)
     fid = FrechetInceptionDistance(feature=2048, normalize=False).to(device)
+    pr_feature_extractor = create_feature_extractor(
+        "inception-v3-compat",
+        ["2048", "logits_unbiased"],
+        cuda=device.type == "cuda",
+        verbose=False,
+    )
     real_state = initialize_state(image_size, device)
     generated_state = initialize_state(image_size, device)
+    real_pr_features: list[torch.Tensor] = []
+    generated_pr_features: list[torch.Tensor] = []
+    generated_isc_logits: list[torch.Tensor] = []
 
     progress = Progress(
         SpinnerColumn(),
@@ -169,7 +187,9 @@ def main() -> None:
         real_task = progress.add_task("Processing real images", total=args.num_real)
         for images, _ in real_loader:
             images = images.to(device, non_blocking=True)
-            fid.update(to_uint8_images(images), real=True)
+            real_uint8 = to_uint8_images(images)
+            fid.update(real_uint8, real=True)
+            real_pr_features.append(pr_feature_extractor(real_uint8)[0].detach().cpu())
             update_state(real_state, images, args.hf_threshold)
             progress.advance(real_task, int(images.shape[0]))
 
@@ -187,11 +207,33 @@ def main() -> None:
                 device=device,
                 dtype=torch.float32,
             )
-            fid.update(to_uint8_images(samples), real=False)
+            generated_uint8 = to_uint8_images(samples)
+            fid.update(generated_uint8, real=False)
+            generated_features, generated_logits = pr_feature_extractor(generated_uint8)
+            generated_pr_features.append(generated_features.detach().cpu())
+            generated_isc_logits.append(generated_logits.detach().cpu())
             update_state(generated_state, samples, args.hf_threshold)
             progress.advance(generated_task, current_batch_size)
 
     metrics = {"fid": float(fid.compute().item())}
+    metrics.update(
+        isc_features_to_metric(
+            torch.cat(generated_isc_logits, dim=0),
+            splits=min(10, args.num_samples),
+            shuffle=True,
+            rng_seed=2020,
+        )
+    )
+    metrics.update(
+        prc_features_to_metric(
+            torch.cat(generated_pr_features, dim=0),
+            torch.cat(real_pr_features, dim=0),
+            prc_neighborhood=args.pr_neighborhood,
+            prc_batch_size=args.pr_batch_size,
+            save_cpu_ram=True,
+            verbose=False,
+        )
+    )
     metrics.update(compare_paper_metrics(real_state, generated_state))
     console.print(render_metrics_table(metrics))
     if args.output is not None:
